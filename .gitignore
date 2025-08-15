@@ -1,0 +1,6 @@
+node_modules/
+package.json
+package-lock.json
+zip-plugin.js
+copy-files.js
+dist/
