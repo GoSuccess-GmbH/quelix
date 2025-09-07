@@ -187,6 +187,31 @@ jobs:
             --exclude='README.md' \
             ./ "$SVN_WORKDIR"/trunk/
 
+      - name: Patch plugin for WP.org PHP parser compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="$SVN_WORKDIR/trunk/quelix.php"
+          if [ -f "$FILE" ]; then
+            echo "Patching $FILE to remove typed class constants for WP.org compatibility."
+            sed -i.bak -E "s/private const string ACTION_KEY/private const ACTION_KEY/" "$FILE"
+            rm -f "$FILE.bak"
+            # Verify patch
+            if grep -q "private const string ACTION_KEY" "$FILE"; then
+              echo "Plugin patch verification failed: typed constant still present in $FILE" >&2
+              exit 1
+            else
+              echo "Patch successfully applied."
+            fi
+            # Lint the patched file to ensure valid PHP syntax
+            php -l "$FILE" || {
+              echo "PHP lint failed after patching plugin file: $FILE" >&2
+              exit 1
+            }
+          else
+            echo "Plugin file not found at: $FILE (skipping patch)"
+          fi
+
       - name: Synchronize plugin assets to $SVN_WORKDIR/assets (from repo $ASSETS_DIR)
         shell: bash
         run: |
