@@ -81,9 +81,6 @@ Hook into `quentn_contact_data` and append additional key/value pairs supported 
 8. Troubleshooting view – logs & error handling.
 
 == Changelog ==
+
 = 1.0.0 =
 * Initial public release: Bricks form action for Quentn with tags + field mapping.
-
-== Filters ==
-`quentn_contact_data` Modify the associative array payload before sending to Quentn.
-`quentn_contact_terms` Modify the array of term (tag) IDs applied to the new contact.
