@@ -1,0 +1,105 @@
+name: Update WordPress.org Assets
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'readme.txt'
+      - 'svn/assets/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wporg-assets-update
+  cancel-in-progress: true
+
+jobs:
+  update-assets:
+    name: Update WP.org Assets & Readme
+    runs-on: ubuntu-latest
+    env:
+      SLUG: quelix
+      SVN_URL: https://plugins.svn.wordpress.org/quelix
+      SVN_WORKDIR: wporg-svn
+      ASSETS_DIR: svn/assets
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: SVN Checkout (trunk and assets only)
+        shell: bash
+        run: |
+          # Ensure Subversion is installed
+          sudo apt-get update -y
+          sudo apt-get install -y subversion
+          svn --version
+          # Checkout only the directories we need to modify
+          svn co --depth=immediates "$SVN_URL" "$SVN_WORKDIR"
+          svn update --set-depth=infinity "$SVN_WORKDIR/trunk"
+          svn update --set-depth=infinity "$SVN_WORKDIR/assets"
+
+      - name: Synchronize plugin assets to $SVN_WORKDIR/assets
+        shell: bash
+        run: |
+          if [ -d "$ASSETS_DIR" ]; then
+            echo "Syncing repo assets from $ASSETS_DIR → $SVN_WORKDIR/assets"
+            # Ensure the assets directory exists in the SVN checkout
+            mkdir -p "$SVN_WORKDIR"/assets
+            rsync -rc --delete \
+              --include='*.png' --include='*.jpg' --include='*.jpeg' --include='*.gif' --include='*.svg' \
+              --include='*.webp' --include='*.mp4' \
+              --exclude='*' \
+              "$ASSETS_DIR"/ "$SVN_WORKDIR"/assets/
+          else
+            echo "No repo assets found in $ASSETS_DIR. Skipping."
+          fi
+
+      - name: Synchronize readme.txt to $SVN_WORKDIR/trunk
+        shell: bash
+        run: |
+          echo "Copying readme.txt to SVN trunk"
+          cp -f readme.txt "$SVN_WORKDIR/trunk/readme.txt"
+
+      - name: Prepare SVN changes (add/delete)
+        shell: bash
+        working-directory: ${{ env.SVN_WORKDIR }}
+        run: |
+          # First, check if there are any actual changes to commit
+          if [ -z "$(svn status)" ]; then
+            echo "No changes detected in SVN checkout. Nothing to commit."
+            echo "NO_CHANGES=true" >> $GITHUB_ENV
+            exit 0
+          fi
+          echo "Changes detected. Preparing for commit."
+          # Remove deleted files from SVN
+          svn status | awk '/^!/ {print $2}' | xargs -r svn rm --force
+          # Add new/unversioned files
+          svn add . --force --no-auto-props
+          svn status
+
+      - name: Commit to WordPress.org SVN
+        if: env.NO_CHANGES != 'true'
+        shell: bash
+        working-directory: ${{ env.SVN_WORKDIR }}
+        env:
+          SVN_USERNAME: ${{ secrets.WPORG_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.WPORG_PASSWORD }}
+        run: |
+          if [ -z "$SVN_USERNAME" ] || [ -z "$SVN_PASSWORD" ]; then
+            echo "Please set WPORG credentials as secrets (WPORG_USERNAME, WPORG_PASSWORD)." >&2
+            exit 1
+          fi
+          svn commit \
+            --username "$SVN_USERNAME" \
+            --password "$SVN_PASSWORD" \
+            --no-auth-cache \
+            --non-interactive \
+            -m "Update assets and readme.txt from GitHub commit ${{ github.sha }}"
+
+      - name: Output – Success Info
+        if: success() && env.NO_CHANGES != 'true'
+        shell: bash
+        run: |
+          echo "Successfully updated assets and readme.txt on WordPress.org."
