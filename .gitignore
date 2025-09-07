@@ -4,3 +4,5 @@ package-lock.json
 zip-plugin.js
 copy-files.js
 dist/
+svn/assets/*.afdesign
+vendor/

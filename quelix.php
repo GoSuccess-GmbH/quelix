@@ -4,7 +4,7 @@
  * Plugin Name:       Quelix
  * Description:       Integrates Quentn as an action into the Bricks Builder form element.
  * Version:           1.0.0
- * Requires at least: 6.8.0
+ * Requires at least: 6.8
  * Requires PHP:      8.3
  * Author:            GoSuccess
  * Author URI:        https://gosuccess.io

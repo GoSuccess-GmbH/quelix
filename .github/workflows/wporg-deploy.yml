@@ -1,0 +1,336 @@
+name: Deploy to WordPress.org
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wporg-deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to WP.org SVN
+    runs-on: ubuntu-latest
+    env:
+      SLUG: quelix
+      SVN_URL: https://plugins.svn.wordpress.org/quelix
+      TAG_NAME: ${{ github.event.release.tag_name }}
+      SVN_WORKDIR: wporg-svn
+      ASSETS_DIR: svn/assets
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP with Composer
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          tools: composer
+          coverage: none
+
+      - name: Install production dependencies (Composer)
+        shell: bash
+        run: |
+          composer --version
+          composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
+
+      - name: Determine version from release tag (without v prefix)
+        shell: bash
+        run: |
+          VERSION="$TAG_NAME"
+          VERSION=${VERSION#v}
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Release-Version: $VERSION"
+
+      - name: Check version consistency in quelix.php
+        shell: bash
+        run: |
+          FILE_VERSION=$(awk 'BEGIN{FS=":"} /^[[:space:]]*\*[[:space:]]*Version[[:space:]]*:/ {v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); print v; exit}' quelix.php || true)
+          if [ -z "$FILE_VERSION" ]; then
+            echo "Could not find version in quelix.php." >&2
+            exit 1
+          fi
+          echo "quelix.php Version: $FILE_VERSION"
+          if [ "$FILE_VERSION" != "$VERSION" ]; then
+            echo "Version mismatch: Tag $VERSION != quelix.php $FILE_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Prepare changelog (readme.txt current only; move old to changelog.txt)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ensure jq is available for parsing the release body
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y jq
+          fi
+          echo "Preparing changelog for version $VERSION"
+          # Extract release body from event payload
+          RELEASE_BODY=$(jq -r '.release.body // ""' "$GITHUB_EVENT_PATH")
+          NOTES_FILE=$(mktemp)
+          if [ -z "$RELEASE_BODY" ]; then
+            echo "* No release notes provided." > "$NOTES_FILE"
+          else
+            # Prefix non-empty lines with '* '
+            printf '%s\n' "$RELEASE_BODY" | sed '/./ s/^/* /' > "$NOTES_FILE"
+          fi
+
+          # Capture only the top changelog entry (first version section under the heading)
+          TOP_ENTRY=$(mktemp)
+          awk '
+            BEGIN { in_ch=0; in_top=0 }
+            /^==[[:space:]]*Changelog[[:space:]]*==[[:space:]]*$/ { in_ch=1; next }
+            in_ch && /^=[[:space:]]/ { if (in_top) exit; in_top=1 }
+            in_top { print }
+          ' readme.txt > "$TOP_ENTRY" || true
+
+          # On first run, migrate the entire existing changelog section to changelog.txt
+          if [ ! -f changelog.txt ]; then
+            OLD_CHANGELOG=$(mktemp)
+            awk '
+              BEGIN { in_ch=0 }
+              /^==[[:space:]]*Changelog[[:space:]]*==[[:space:]]*$/ { in_ch=1; next }
+              in_ch { print }
+            ' readme.txt > "$OLD_CHANGELOG" || true
+            if [ -s "$OLD_CHANGELOG" ]; then
+              cp "$OLD_CHANGELOG" changelog.txt
+              echo >> changelog.txt
+            fi
+          fi
+
+            # Prepend the top entry to changelog.txt if not already present (newest first)
+            if [ -s "$TOP_ENTRY" ]; then
+                HEADER=$(head -n 1 "$TOP_ENTRY")
+                echo "Preparing to append previous top entry: $HEADER"
+                if [ -f changelog.txt ]; then
+                if ! grep -Fqx "$HEADER" changelog.txt; then
+                    TMP_CL=$(mktemp)
+                    cat "$TOP_ENTRY" > "$TMP_CL"
+                    echo >> "$TMP_CL"
+                    cat changelog.txt >> "$TMP_CL"
+                    mv "$TMP_CL" changelog.txt
+                else
+                    echo "Top entry already present in changelog.txt, skipping append."
+                fi
+                else
+                cp "$TOP_ENTRY" changelog.txt
+                echo >> changelog.txt
+                fi
+            fi
+
+          # Rebuild readme.txt with only the current release under == Changelog ==
+          TMP_README=$(mktemp)
+          awk -v ver="$VERSION" -v notes="$NOTES_FILE" '
+            BEGIN{printed=0}
+            {
+              if (printed==0) {
+                print $0
+                if ($0 ~ /^==[[:space:]]*Changelog[[:space:]]*==[[:space:]]*$/) {
+                  print ""
+                  print "= " ver " ="
+                  while ((getline line < notes) > 0) print line
+                  printed=1
+                }
+              }
+            }
+          ' readme.txt > "$TMP_README"
+          mv "$TMP_README" readme.txt
+
+          # Update Stable tag: to match the release version (optional but recommended)
+          sed -i.bak -E "s/^(Stable tag:[[:space:]]*).*/\\1$VERSION/" readme.txt && rm -f readme.txt.bak
+
+      - name: Snapshot prepared changelog files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .changelog-tmp
+          cp -f readme.txt .changelog-tmp/readme.txt
+          if [ -f changelog.txt ]; then cp -f changelog.txt .changelog-tmp/changelog.txt; fi
+
+      - name: Commit changelog back to repository (main)
+        shell: bash
+        env:
+          GH_USER_NAME: github-actions[bot]
+          GH_USER_EMAIL: github-actions[bot]@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git config user.name "$GH_USER_NAME"
+          git config user.email "$GH_USER_EMAIL"
+          git fetch --no-tags origin main
+          git checkout -B main origin/main
+          cp -f .changelog-tmp/readme.txt readme.txt
+          if [ -f .changelog-tmp/changelog.txt ]; then cp -f .changelog-tmp/changelog.txt changelog.txt; fi
+          git add readme.txt || true
+          if [ -f changelog.txt ]; then git add changelog.txt; fi
+          if git diff --cached --quiet; then
+            echo "No changelog changes to commit."
+          else
+            git commit -m "chore(release): update changelog for $VERSION"
+            git push origin HEAD:main
+          fi
+
+      - name: SVN Checkout
+        shell: bash
+        run: |
+          # Ensure Subversion is installed (guard in case previous step is missing in old tags)
+          if ! command -v svn >/dev/null 2>&1; then
+            echo "svn not found. Installing..."
+            sudo apt-get update -y
+            sudo apt-get install -y subversion
+          fi
+          svn --version
+          svn co "$SVN_URL" "$SVN_WORKDIR"
+
+      - name: Synchronize files to trunk/ (with exclusions)
+        shell: bash
+        run: |
+          rsync -rc --delete \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude="$SVN_WORKDIR"/ \
+            --exclude='svn/' \
+            --exclude='react/' \
+            --exclude='node_modules/' \
+            --exclude='composer.lock' \
+            --exclude='phpcs.xml.dist' \
+            --exclude='sync.js' \
+            --exclude='README.md' \
+            ./ "$SVN_WORKDIR"/trunk/
+
+      - name: Patch vendor for WP.org PHP parser compatibility (strip PHP 8.1/8.2 types)
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="$SVN_WORKDIR/trunk/vendor/symfony/config/Definition/Builder/NodeBuilder.php"
+          if [ -f "$FILE" ]; then
+            echo "Patching $FILE for DNF/intersection type removal"
+            # 1) Remove DNF typed property on $parent (preserve indentation)
+            sed -i.bak -E "s/([[:space:]]*)protected[[:space:]]*\(NodeDefinition[[:space:]]*\&[[:space:]]*ParentNodeDefinitionInterface\)[[:space:]]*\|[[:space:]]*null[[:space:]]*\$parent[[:space:]]*=[[:space:]]*null;/\1protected \$parent = null;/" "$FILE"
+            # 2) Relax setParent() parameter type (keep return type 'static')
+            sed -i.bak -E "s/public function setParent\(\(NodeDefinition[[:space:]]*\&[[:space:]]*ParentNodeDefinitionInterface\)[[:space:]]*\|[[:space:]]*null[[:space:]]*\$parent\):[[:space:]]*static/public function setParent(\$parent): static/" "$FILE"
+            # 3) Remove intersection return type from end()
+            sed -i.bak -E "s/public function end\(\):[[:space:]]*NodeDefinition[[:space:]]*\&[[:space:]]*ParentNodeDefinitionInterface/public function end()/" "$FILE"
+            rm -f "$FILE".bak
+
+            # Fallback: if still present, try a broader awk-based rewrite for the 3 lines
+            if grep -Eq "NodeDefinition[[:space:]]*\&[[:space:]]*ParentNodeDefinitionInterface" "$FILE"; then
+              echo "Applying awk fallback patch..."
+              awk '
+                function indent_of(s,   m){ m=match(s,/^[[:space:]]*/); return substr(s,1,RLENGTH) }
+                BEGIN { changed=0 }
+                {
+                  line=$0
+                  if (line ~ /protected[[:space:]]*\(NodeDefinition[[:space:]]*&[[:space:]]*ParentNodeDefinitionInterface\)[[:space:]]*\|[[:space:]]*null[[:space:]]*\$parent[[:space:]]*=.*/) {
+                    ind=indent_of(line)
+                    line=ind "protected $parent = null;"
+                    print line
+                    changed=1
+                    next
+                  }
+                  if (line ~ /public[[:space:]]+function[[:space:]]+setParent\(\(NodeDefinition[[:space:]]*&[[:space:]]*ParentNodeDefinitionInterface\)[[:space:]]*\|[[:space:]]*null[[:space:]]*\$parent\)[[:space:]]*:[[:space:]]*static/) {
+                    ind=indent_of(line)
+                    line=ind "public function setParent($parent): static"
+                    print line
+                    changed=1
+                    next
+                  }
+                  if (line ~ /public[[:space:]]+function[[:space:]]+end\(\)[[:space:]]*:[[:space:]]*NodeDefinition[[:space:]]*&[[:space:]]*ParentNodeDefinitionInterface/) {
+                    ind=indent_of(line)
+                    line=ind "public function end()"
+                    print line
+                    changed=1
+                    next
+                  }
+                  print $0
+                }
+                END { }
+              ' "$FILE" > "$FILE.tmp" && mv "$FILE.tmp" "$FILE"
+            fi
+
+            # 4) Verify patch applied – fail early if any intersection/DNF type remains
+            if grep -Eq "NodeDefinition[[:space:]]*\&[[:space:]]*ParentNodeDefinitionInterface" "$FILE"; then
+              echo "Vendor patch verification failed: intersection types still present in $FILE" >&2
+              echo "--- Context (head) ---" >&2
+              head -n 60 "$FILE" >&2 || true
+              exit 1
+            fi
+
+            # 5) Lint the patched file to ensure valid PHP syntax for wp.org parser
+            php -l "$FILE" || {
+              echo "PHP lint failed after patching vendor file: $FILE" >&2
+              exit 1
+            }
+          else
+            echo "Symfony NodeBuilder not found at: $FILE (skipping)"
+          fi
+
+      - name: Synchronize plugin assets to $SVN_WORKDIR/assets (from repo $ASSETS_DIR)
+        shell: bash
+        run: |
+          if [ -d "$ASSETS_DIR" ]; then
+            echo "Syncing repo assets from $ASSETS_DIR → $SVN_WORKDIR/assets"
+            mkdir -p "$SVN_WORKDIR"/assets
+            rsync -rc --delete \
+              --include='*.png' --include='*.jpg' --include='*.jpeg' --include='*.gif' --include='*.svg' \
+              --include='*.webp' --include='*.mp4' \
+              --exclude='*' \
+              "$ASSETS_DIR"/ "$SVN_WORKDIR"/assets/
+          else
+            echo "No repo assets found in $ASSETS_DIR. Skipping."
+          fi
+
+      - name: Prepare SVN changes (add/delete)
+        shell: bash
+        working-directory: ${{ env.SVN_WORKDIR }}
+        run: |
+          svn status
+          # Remove deleted files from SVN
+          svn status | awk '/^!/ {print $2}' | xargs -r svn rm --force
+          # Add new/unversioned files
+          svn add . --force --no-auto-props
+          svn status
+
+      - name: Check if tag already exists
+        shell: bash
+        working-directory: ${{ env.SVN_WORKDIR }}
+        run: |
+          if svn ls "$SVN_URL/tags/$VERSION" >/dev/null 2>&1; then
+            echo "Tag $VERSION already exists in WP.org SVN." >&2
+            exit 1
+          fi
+
+      - name: Create tag in SVN
+        shell: bash
+        working-directory: ${{ env.SVN_WORKDIR }}
+        run: |
+          svn copy trunk "tags/$VERSION"
+          svn status
+
+      - name: Commit to WordPress.org SVN
+        shell: bash
+        working-directory: ${{ env.SVN_WORKDIR }}
+        env:
+          SVN_USERNAME: ${{ secrets.WPORG_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.WPORG_PASSWORD }}
+        run: |
+          if [ -z "$SVN_USERNAME" ] || [ -z "$SVN_PASSWORD" ]; then
+            echo "Please set WPORG credentials as secrets (WPORG_USERNAME, WPORG_PASSWORD)." >&2
+            exit 1
+          fi
+          svn commit \
+            --username "$SVN_USERNAME" \
+            --password "$SVN_PASSWORD" \
+            --no-auth-cache \
+            --non-interactive \
+            -m "Release $VERSION from GitHub release $TAG_NAME"
+
+      - name: Output – Success Info
+        if: success()
+        shell: bash
+        run: |
+          echo "Successfully deployed: $SVN_URL/tags/$VERSION"

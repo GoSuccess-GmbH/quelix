@@ -2,7 +2,7 @@
 Contributors: gosuccess
 Donate link: https://gosuccess.io
 Tags: bricks, forms, quentn, contacts, integration
-Requires at least: 6.8.0
+Requires at least: 6.8
 Tested up to: 6.8
 Requires PHP: 8.3
 Stable tag: 1.0.0
@@ -36,6 +36,10 @@ Integrate the Quentn marketing & automation platform directly into Bricks Builde
 
 === Privacy / GDPR ===
 You are responsible for obtaining valid consent before transmitting personal data to Quentn. Add an explicit consent checkbox where required and mention the data flow in your privacy policy. Collect only necessary data. Consider double opt-in if mandated by your jurisdiction.
+
+== Screenshots ==
+1. Select "Quentn" as the action for your form.
+2. Assign the tags and fields to be sent to Quentn.
 
 == Installation ==
 1. Upload the `quelix` folder to `/wp-content/plugins/` or install the ZIP via the WordPress admin.
