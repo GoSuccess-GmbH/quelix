@@ -28,24 +28,39 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: SVN Checkout (trunk and assets only)
+      - name: SVN Checkout and update specific directories
         shell: bash
         run: |
           # Ensure Subversion is installed
-          sudo apt-get update -y
-          sudo apt-get install -y subversion
+          sudo apt-get update -y && sudo apt-get install -y subversion
           svn --version
-          # Checkout only the directories we need to modify
+          
+          # Checkout only the top-level directories
           svn co --depth=immediates "$SVN_URL" "$SVN_WORKDIR"
+          
+          # Update trunk and assets, which we always need
           svn update --set-depth=infinity "$SVN_WORKDIR/trunk"
           svn update --set-depth=infinity "$SVN_WORKDIR/assets"
+          
+          # Determine the stable tag from the trunk's readme.txt
+          if [ -f "$SVN_WORKDIR/trunk/readme.txt" ]; then
+            STABLE_TAG=$(grep -i "^Stable tag:" "$SVN_WORKDIR/trunk/readme.txt" | awk -F' ' '{print $3}' | tr -d '\r\n')
+            if [ -n "$STABLE_TAG" ]; then
+              echo "Stable tag is $STABLE_TAG. Updating tags/$STABLE_TAG directory."
+              svn update --set-depth=infinity "$SVN_WORKDIR/tags/$STABLE_TAG"
+              echo "STABLE_TAG=$STABLE_TAG" >> $GITHUB_ENV
+            else
+              echo "Could not determine stable tag from trunk/readme.txt."
+            fi
+          else
+            echo "Warning: trunk/readme.txt not found. Cannot determine stable tag."
+          fi
 
       - name: Synchronize plugin assets to $SVN_WORKDIR/assets
         shell: bash
         run: |
           if [ -d "$ASSETS_DIR" ]; then
             echo "Syncing repo assets from $ASSETS_DIR → $SVN_WORKDIR/assets"
-            # Ensure the assets directory exists in the SVN checkout
             mkdir -p "$SVN_WORKDIR"/assets
             rsync -rc --delete \
               --include='*.png' --include='*.jpg' --include='*.jpeg' --include='*.gif' --include='*.svg' \
@@ -56,11 +71,18 @@ jobs:
             echo "No repo assets found in $ASSETS_DIR. Skipping."
           fi
 
-      - name: Synchronize readme.txt to $SVN_WORKDIR/trunk
+      - name: Synchronize readme.txt to SVN trunk and stable tag
         shell: bash
         run: |
-          echo "Copying readme.txt to SVN trunk"
+          echo "Copying readme.txt to SVN trunk..."
           cp -f readme.txt "$SVN_WORKDIR/trunk/readme.txt"
+          
+          if [ -n "$STABLE_TAG" ] && [ -d "$SVN_WORKDIR/tags/$STABLE_TAG" ]; then
+            echo "Copying readme.txt to SVN tags/$STABLE_TAG..."
+            cp -f readme.txt "$SVN_WORKDIR/tags/$STABLE_TAG/readme.txt"
+          else
+            echo "Skipping readme.txt copy to tag directory (no stable tag found or directory does not exist)."
+          fi
 
       - name: Prepare SVN changes (add/delete)
         shell: bash
