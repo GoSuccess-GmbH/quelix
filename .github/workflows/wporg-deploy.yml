@@ -179,6 +179,8 @@ jobs:
           rsync -rc --delete \
             --exclude='.git/' \
             --exclude='.github/' \
+            --exclude='.gitattributes/' \
+            --exclude='.gitignore/' \
             --exclude="$SVN_WORKDIR"/ \
             --exclude='svn/' \
             --exclude='react/' \
