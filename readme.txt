@@ -1,6 +1,5 @@
 === Quelix ===
 Contributors: gosuccess
-Donate link: https://gosuccess.io
 Tags: bricks, forms, quentn, contacts, integration
 Requires at least: 6.8
 Tested up to: 6.8
